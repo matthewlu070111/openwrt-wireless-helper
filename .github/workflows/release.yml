@@ -118,11 +118,11 @@ jobs:
           path: openwrt/dl
           key: ${{ runner.os }}-openwrt-dl-${{ steps.sdk.outputs.openwrt_version }}-x86-64-${{ matrix.format }}-v1
 
-      - name: 更新 LuCI feeds
+      - name: 更新 feeds
         working-directory: openwrt
         run: |
-          ./scripts/feeds update luci
-          ./scripts/feeds install -p luci -a
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
       - name: 注入软件包
         run: |
@@ -147,7 +147,14 @@ jobs:
       - name: 编译软件包
         working-directory: openwrt
         run: |
-          make package/lua/compile -j1 V=s
+          if [ -d package/feeds/packages/lua ]; then
+            make package/feeds/packages/lua/compile -j1 V=s
+          elif [ -d package/utils/lua ]; then
+            make package/utils/lua/compile -j1 V=s
+          else
+            echo "找不到 Lua 软件包目录。"
+            exit 1
+          fi
           make package/openwrt-wireless-helper/{clean,compile} -j1 V=s
 
       - name: 收集产物
