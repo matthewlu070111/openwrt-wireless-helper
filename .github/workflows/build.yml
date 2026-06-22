@@ -116,6 +116,7 @@ jobs:
       - name: 编译软件包
         working-directory: openwrt
         run: |
+          make package/lua/compile -j1 V=s
           make package/openwrt-wireless-helper/{clean,compile} -j1 V=s
 
       - name: 收集产物
