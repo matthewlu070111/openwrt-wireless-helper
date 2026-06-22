@@ -1,0 +1,5 @@
+config settings 'settings'
+	option enabled '0'
+	option path_prefix 'platform/ff5c0000.usb'
+	option preferred_radio ''
+	option reload_wifi '0'

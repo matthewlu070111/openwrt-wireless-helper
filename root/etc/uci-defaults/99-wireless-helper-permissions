@@ -1,0 +1,7 @@
+#!/bin/sh
+
+chmod 0755 /usr/libexec/wireless-helper \
+	/etc/init.d/wireless_helper \
+	/etc/hotplug.d/usb/99-wireless-helper 2>/dev/null
+
+exit 0

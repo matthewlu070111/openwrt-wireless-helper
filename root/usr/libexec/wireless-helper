@@ -1,0 +1,354 @@
+#!/bin/sh
+
+. /lib/functions.sh
+
+TMP_DIR="${TMPDIR:-/tmp}"
+STATE_FILE="$TMP_DIR/wireless-helper.devices.$$"
+PLAN_FILE="$TMP_DIR/wireless-helper.plan.$$"
+KNOWN_FILE="$TMP_DIR/wireless-helper.known.$$"
+IFACE_FILE="$TMP_DIR/wireless-helper.ifaces.$$"
+
+cleanup_tmp() {
+	rm -f "$STATE_FILE" "$PLAN_FILE" "$KNOWN_FILE" "$IFACE_FILE"
+}
+trap cleanup_tmp EXIT
+
+usage() {
+	cat <<'EOF'
+Usage: wireless-helper status|list-radios|dry-run|clean|remember
+
+status      Show grouped USB Wi-Fi devices, active radios, and new sections.
+list-radios Print radio choices for LuCI.
+dry-run     Show which duplicate wifi-device sections would be removed.
+clean       Migrate wifi-iface references, remove duplicate wifi-device sections,
+            commit /etc/config/wireless, and optionally reload Wi-Fi.
+remember    Save currently detected matching radios as the known baseline.
+EOF
+}
+
+get_setting() {
+	local value
+	value="$(uci -q get "wireless_helper.settings.$1")"
+	[ -n "$value" ] && printf '%s' "$value" || printf '%s' "$2"
+}
+
+normalize_path() {
+	local path="$1"
+	local prefix="$2"
+
+	case "$path" in
+		"$prefix"/usb*/*-1/*-1:1.0) ;;
+		*) return 1 ;;
+	esac
+
+	printf '%s\n' "$path" | sed -r 's#/usb[0-9]+/[0-9]+-1/[0-9]+-1:#/usbX/X-1/X-1:#'
+}
+
+collect_known_radio() {
+	local radio="$1"
+
+	[ -n "$radio" ] && echo "$radio" >> "$KNOWN_FILE"
+}
+
+build_known() {
+	: > "$KNOWN_FILE"
+	config_load wireless_helper
+	config_list_foreach settings known_radio collect_known_radio
+}
+
+is_known_radio() {
+	grep -qx "$1" "$KNOWN_FILE" 2>/dev/null
+}
+
+append_iface() {
+	local device="$1"
+	local iface="$2"
+
+	if grep -q "^$device|" "$IFACE_FILE" 2>/dev/null; then
+		sed -i "s#^$device|#&$iface,#" "$IFACE_FILE"
+	else
+		printf '%s|%s,\n' "$device" "$iface" >> "$IFACE_FILE"
+	fi
+}
+
+collect_iface() {
+	local iface="$1"
+	local device disabled ifname network mode
+
+	config_get device "$iface" device
+	[ -n "$device" ] || return 0
+
+	config_get disabled "$iface" disabled 0
+	[ "$disabled" = "1" ] && return 0
+
+	config_get ifname "$iface" ifname
+	config_get network "$iface" network
+	config_get mode "$iface" mode
+
+	append_iface "$device" "$iface"
+	[ -n "$ifname" ] && append_iface "$device" "$ifname"
+	[ -n "$network" ] && append_iface "$device" "net:$network"
+	[ -n "$mode" ] && append_iface "$device" "mode:$mode"
+}
+
+get_ifaces() {
+	local device="$1"
+	local value
+
+	value="$(awk -F'|' -v dev="$device" '$1 == dev { print $2; exit }' "$IFACE_FILE" 2>/dev/null)"
+	value="${value%,}"
+	[ -n "$value" ] && printf '%s' "$value" || printf '-'
+}
+
+get_phys() {
+	local path="$1"
+	local dir="/sys/devices/$path/ieee80211"
+	local phys phy
+
+	if [ -d "$dir" ]; then
+		for phy in "$dir"/phy*; do
+			[ -e "$phy" ] || continue
+			phys="${phys:+$phys,}$(basename "$phy")"
+		done
+	fi
+
+	[ -n "$phys" ] && printf '%s' "$phys" || printf '-'
+}
+
+collect_device() {
+	local section="$1"
+	local path disabled key exists phys ifaces active new
+
+	config_get path "$section" path
+	[ -n "$path" ] || return 0
+
+	key="$(normalize_path "$path" "$PATH_PREFIX")" || return 0
+	exists=0
+	[ -e "/sys/devices/$path" ] && exists=1
+	config_get disabled "$section" disabled 0
+	phys="$(get_phys "$path")"
+	ifaces="$(get_ifaces "$section")"
+	active=0
+	[ "$exists" = "1" ] && [ "$disabled" != "1" ] && [ "$ifaces" != "-" ] && active=1
+	new=1
+	is_known_radio "$section" && new=0
+
+	printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+		"$section" "$exists" "$disabled" "$key" "$path" "$phys" "$ifaces" "$active" "$new" >> "$STATE_FILE"
+}
+
+build_state() {
+	: > "$STATE_FILE"
+	: > "$IFACE_FILE"
+	build_known
+	config_load wireless
+	config_foreach collect_iface wifi-iface
+	config_foreach collect_device wifi-device
+}
+
+build_plan() {
+	local preferred="$1"
+
+	awk -F'|' -v preferred="$preferred" '
+	{
+		section=$1; exists=$2; key=$4; active=$8
+		count[key]++
+		order[++n]=section
+		keys[section]=key
+		lines[section]=$0
+		if (!(key in first)) first[key]=section
+		if (exists == "1" && !(key in live)) live[key]=section
+		if (active == "1" && !(key in active_keep)) active_keep[key]=section
+		if (section == preferred) preferred_key=key
+	}
+	END {
+		for (i = 1; i <= n; i++) {
+			section=order[i]
+			key=keys[section]
+			keep=(key == preferred_key) ? preferred : ((key in active_keep) ? active_keep[key] : ((key in live) ? live[key] : first[key]))
+			if (count[key] > 1 && section != keep) {
+				print "remove|" section "|" keep "|" lines[section]
+			}
+		}
+	}
+	' "$STATE_FILE" > "$PLAN_FILE"
+}
+
+print_status() {
+	local preferred="$1"
+
+	if [ ! -s "$STATE_FILE" ]; then
+		echo "No matching USB Wi-Fi radio paths found."
+		echo "Path prefix: $PATH_PREFIX"
+		return 0
+	fi
+
+	echo "Preferred radio: ${preferred:-auto}"
+	echo "Path prefix: $PATH_PREFIX"
+	echo ""
+	echo "Matching USB Wi-Fi radio paths:"
+	awk -F'|' -v preferred="$preferred" '
+	{
+		mark=($1 == preferred) ? "preferred" : "-"
+		printf "  %-12s exists=%s active=%s new=%s disabled=%s phy=%s ifaces=%s keep_hint=%s\n", $1, $2, $8, $9, $3, $6, $7, mark
+		printf "      path=%s\n", $5
+		groups[$4]++
+	}
+	END {
+		print ""
+		print "Duplicate groups:"
+		found=0
+		for (key in groups) {
+			if (groups[key] > 1) {
+				found=1
+				printf "  %s (%d radios)\n", key, groups[key]
+			}
+		}
+		if (!found) print "  none"
+	}
+	' "$STATE_FILE"
+}
+
+print_radio_choices() {
+	if [ ! -s "$STATE_FILE" ]; then
+		return 0
+	fi
+
+	awk -F'|' '
+	{
+		printf "%s|%s exists=%s active=%s new=%s phy=%s ifaces=%s path=%s\n", $1, $1, $2, $8, $9, $6, $7, $5
+	}
+	' "$STATE_FILE"
+}
+
+print_plan() {
+	if [ ! -s "$PLAN_FILE" ]; then
+		echo "No duplicate wifi-device sections need cleanup."
+		return 0
+	fi
+
+	echo "Cleanup plan:"
+	awk -F'|' '
+	{
+		printf "  remove %-12s keep %-12s old_path=%s\n", $2, $3, $8
+	}
+	' "$PLAN_FILE"
+}
+
+migrate_iface() {
+	local iface="$1"
+	local device
+
+	config_get device "$iface" device
+	[ "$device" = "$OLD_DEVICE" ] || return 0
+
+	echo "  migrate wifi-iface $iface: $OLD_DEVICE -> $KEEP_DEVICE"
+	uci -q set "wireless.$iface.device=$KEEP_DEVICE"
+}
+
+state_value() {
+	local section="$1"
+	local field="$2"
+
+	awk -F'|' -v section="$section" -v field="$field" '$1 == section { print $field; exit }' "$STATE_FILE"
+}
+
+remember_radios() {
+	local radios
+
+	uci -q delete wireless_helper.settings.known_radio
+	radios="$(awk -F'|' '{ print $1 }' "$STATE_FILE")"
+	for radio in $radios; do
+		uci -q add_list "wireless_helper.settings.known_radio=$radio"
+	done
+	uci -q commit wireless_helper
+	echo "Saved detected radios as known baseline."
+}
+
+apply_plan() {
+	local changed=0
+	local action old keep old_section old_exists old_disabled old_key old_path old_phy old_ifaces old_active old_new reload_wifi
+	local keep_exists
+
+	if [ ! -s "$PLAN_FILE" ]; then
+		echo "No duplicate wifi-device sections need cleanup."
+		remember_radios
+		return 0
+	fi
+
+	while IFS='|' read -r action old keep old_section old_exists old_disabled old_key old_path old_phy old_ifaces old_active old_new; do
+		[ "$action" = "remove" ] || continue
+
+		OLD_DEVICE="$old"
+		KEEP_DEVICE="$keep"
+		export OLD_DEVICE KEEP_DEVICE
+
+		echo "Cleaning duplicate wifi-device $old; keeping $keep"
+		keep_exists="$(state_value "$keep" 2)"
+		if [ "$keep_exists" != "1" ] && [ "$old_exists" = "1" ] && [ -n "$old_path" ]; then
+			echo "  update $keep path to active path from $old"
+			uci -q set "wireless.$keep.path=$old_path"
+			uci -q set "wireless.$keep.disabled=0"
+		fi
+
+		config_load wireless
+		config_foreach migrate_iface wifi-iface
+		uci -q delete "wireless.$old"
+		changed=1
+	done < "$PLAN_FILE"
+
+	if [ "$changed" = "1" ]; then
+		uci -q commit wireless
+		echo "Committed /etc/config/wireless."
+		build_state
+		remember_radios
+
+		reload_wifi="$(get_setting reload_wifi 0)"
+		if [ "$reload_wifi" = "1" ]; then
+			wifi reload
+			echo "Reloaded Wi-Fi."
+		fi
+	fi
+}
+
+MODE="$1"
+PATH_PREFIX="$(get_setting path_prefix platform/ff5c0000.usb)"
+PREFERRED_RADIO="$(get_setting preferred_radio "")"
+
+case "$MODE" in
+	status|"")
+		build_state
+		build_plan "$PREFERRED_RADIO"
+		print_status "$PREFERRED_RADIO"
+		echo ""
+		print_plan
+		;;
+	list-radios)
+		build_state
+		print_radio_choices
+		;;
+	dry-run)
+		build_state
+		build_plan "$PREFERRED_RADIO"
+		print_status "$PREFERRED_RADIO"
+		echo ""
+		print_plan
+		;;
+	clean)
+		build_state
+		build_plan "$PREFERRED_RADIO"
+		print_plan
+		apply_plan
+		;;
+	remember)
+		build_state
+		remember_radios
+		;;
+	-h|--help|help)
+		usage
+		;;
+	*)
+		usage >&2
+		exit 1
+		;;
+esac

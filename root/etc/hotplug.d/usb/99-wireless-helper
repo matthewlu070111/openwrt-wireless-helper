@@ -1,0 +1,12 @@
+#!/bin/sh
+
+[ "$ACTION" = "add" ] || [ "$ACTION" = "bind" ] || exit 0
+[ -x /usr/libexec/wireless-helper ] || exit 0
+
+enabled="$(uci -q get wireless_helper.settings.enabled)"
+[ "$enabled" = "1" ] || exit 0
+
+(
+	sleep 8
+	/usr/libexec/wireless-helper clean >/tmp/wireless-helper.hotplug 2>&1
+) &
