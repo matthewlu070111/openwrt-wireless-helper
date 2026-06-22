@@ -14,7 +14,7 @@ on:
       openwrt_apk_version:
         description: "用于 apk 构建的 OpenWrt 版本"
         required: true
-        default: "24.10.2"
+        default: "25.12.3"
       prerelease:
         description: "是否发布为预发布版本"
         required: true
@@ -35,7 +35,7 @@ jobs:
           - format: ipk
             default_openwrt_version: "23.05.5"
           - format: apk
-            default_openwrt_version: "24.10.2"
+            default_openwrt_version: "25.12.3"
 
     steps:
       - name: 检出源码
@@ -158,6 +158,10 @@ jobs:
 
           if [ -z "$(ls artifacts/*.${EXT} 2>/dev/null)" ]; then
             echo "没有找到 ${EXT} 产物。"
+            echo "=== openwrt-wireless-helper 相关文件 ==="
+            find openwrt -type f -name "openwrt-wireless-helper*" | sort || true
+            echo "=== 所有包产物 ==="
+            find openwrt/bin -type f \( -name "*.ipk" -o -name "*.apk" \) | sort || true
             exit 1
           fi
           ls -lh artifacts/

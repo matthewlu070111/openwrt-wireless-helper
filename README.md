@@ -108,3 +108,8 @@ make package/openwrt-wireless-helper/compile V=s
 ```
 
 GitHub Actions 也会自动使用 OpenWrt SDK 构建安装包，并把产物上传到 workflow artifact。
+
+默认构建目标：
+
+- `ipk`：OpenWrt 23.05.x / 24.10.x 等 opkg 系列
+- `apk`：OpenWrt 25.12.x 及更新的 apk 系列
