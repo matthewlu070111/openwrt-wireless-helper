@@ -1,10 +1,10 @@
 include $(TOPDIR)/rules.mk
 
-PKG_NAME:=luci-app-wireless-helper
+PKG_NAME:=openwrt-wireless-helper
 PKG_VERSION:=1.0.0
 PKG_RELEASE:=1
 
-LUCI_TITLE:=LuCI support for cleaning duplicate USB wireless devices
+LUCI_TITLE:=OpenWrt 无线设备重复项管理助手
 LUCI_DEPENDS:=+luci-base
 LUCI_PKGARCH:=all
 

@@ -15,14 +15,14 @@ trap cleanup_tmp EXIT
 
 usage() {
 	cat <<'EOF'
-Usage: wireless-helper status|list-radios|dry-run|clean|remember
+用法: wireless-helper status|list-radios|dry-run|clean|remember
 
-status      Show grouped USB Wi-Fi devices, active radios, and new sections.
-list-radios Print radio choices for LuCI.
-dry-run     Show which duplicate wifi-device sections would be removed.
-clean       Migrate wifi-iface references, remove duplicate wifi-device sections,
-            commit /etc/config/wireless, and optionally reload Wi-Fi.
-remember    Save currently detected matching radios as the known baseline.
+status      显示 USB Wi-Fi 设备分组、正在工作的 radio 和新增项。
+list-radios 输出 LuCI 下拉框使用的 radio 选项。
+dry-run     预览将要删除的重复 wifi-device 配置。
+clean       迁移 wifi-iface 引用，删除重复 wifi-device 配置，
+            提交 /etc/config/wireless，并按需重载 Wi-Fi。
+remember    将当前检测到的匹配 radio 保存为已知基线。
 EOF
 }
 
@@ -178,33 +178,33 @@ print_status() {
 	local preferred="$1"
 
 	if [ ! -s "$STATE_FILE" ]; then
-		echo "No matching USB Wi-Fi radio paths found."
-		echo "Path prefix: $PATH_PREFIX"
+		echo "未找到匹配的 USB Wi-Fi radio 路径。"
+		echo "路径前缀: $PATH_PREFIX"
 		return 0
 	fi
 
-	echo "Preferred radio: ${preferred:-auto}"
-	echo "Path prefix: $PATH_PREFIX"
+	echo "默认保留 radio: ${preferred:-自动}"
+	echo "路径前缀: $PATH_PREFIX"
 	echo ""
-	echo "Matching USB Wi-Fi radio paths:"
+	echo "匹配的 USB Wi-Fi radio 路径:"
 	awk -F'|' -v preferred="$preferred" '
 	{
-		mark=($1 == preferred) ? "preferred" : "-"
-		printf "  %-12s exists=%s active=%s new=%s disabled=%s phy=%s ifaces=%s keep_hint=%s\n", $1, $2, $8, $9, $3, $6, $7, mark
-		printf "      path=%s\n", $5
+		mark=($1 == preferred) ? "用户选择" : "-"
+		printf "  %-12s 存在=%s 工作中=%s 新增=%s 禁用=%s phy=%s 接口=%s 保留提示=%s\n", $1, $2, $8, $9, $3, $6, $7, mark
+		printf "      路径=%s\n", $5
 		groups[$4]++
 	}
 	END {
 		print ""
-		print "Duplicate groups:"
+		print "重复分组:"
 		found=0
 		for (key in groups) {
 			if (groups[key] > 1) {
 				found=1
-				printf "  %s (%d radios)\n", key, groups[key]
+				printf "  %s (%d 个 radio)\n", key, groups[key]
 			}
 		}
-		if (!found) print "  none"
+		if (!found) print "  无"
 	}
 	' "$STATE_FILE"
 }
@@ -216,21 +216,21 @@ print_radio_choices() {
 
 	awk -F'|' '
 	{
-		printf "%s|%s exists=%s active=%s new=%s phy=%s ifaces=%s path=%s\n", $1, $1, $2, $8, $9, $6, $7, $5
+		printf "%s|%s 存在=%s 工作中=%s 新增=%s phy=%s 接口=%s 路径=%s\n", $1, $1, $2, $8, $9, $6, $7, $5
 	}
 	' "$STATE_FILE"
 }
 
 print_plan() {
 	if [ ! -s "$PLAN_FILE" ]; then
-		echo "No duplicate wifi-device sections need cleanup."
+		echo "没有需要清理的重复 wifi-device 配置。"
 		return 0
 	fi
 
-	echo "Cleanup plan:"
+	echo "清理计划:"
 	awk -F'|' '
 	{
-		printf "  remove %-12s keep %-12s old_path=%s\n", $2, $3, $8
+		printf "  删除 %-12s 保留 %-12s 旧路径=%s\n", $2, $3, $8
 	}
 	' "$PLAN_FILE"
 }
@@ -242,7 +242,7 @@ migrate_iface() {
 	config_get device "$iface" device
 	[ "$device" = "$OLD_DEVICE" ] || return 0
 
-	echo "  migrate wifi-iface $iface: $OLD_DEVICE -> $KEEP_DEVICE"
+	echo "  迁移 wifi-iface $iface: $OLD_DEVICE -> $KEEP_DEVICE"
 	uci -q set "wireless.$iface.device=$KEEP_DEVICE"
 }
 
@@ -262,7 +262,7 @@ remember_radios() {
 		uci -q add_list "wireless_helper.settings.known_radio=$radio"
 	done
 	uci -q commit wireless_helper
-	echo "Saved detected radios as known baseline."
+	echo "已将当前检测到的 radio 保存为已知基线。"
 }
 
 apply_plan() {
@@ -271,7 +271,7 @@ apply_plan() {
 	local keep_exists
 
 	if [ ! -s "$PLAN_FILE" ]; then
-		echo "No duplicate wifi-device sections need cleanup."
+		echo "没有需要清理的重复 wifi-device 配置。"
 		remember_radios
 		return 0
 	fi
@@ -283,10 +283,10 @@ apply_plan() {
 		KEEP_DEVICE="$keep"
 		export OLD_DEVICE KEEP_DEVICE
 
-		echo "Cleaning duplicate wifi-device $old; keeping $keep"
+		echo "正在清理重复 wifi-device $old；保留 $keep"
 		keep_exists="$(state_value "$keep" 2)"
 		if [ "$keep_exists" != "1" ] && [ "$old_exists" = "1" ] && [ -n "$old_path" ]; then
-			echo "  update $keep path to active path from $old"
+			echo "  将 $old 的当前可用路径写回 $keep"
 			uci -q set "wireless.$keep.path=$old_path"
 			uci -q set "wireless.$keep.disabled=0"
 		fi
@@ -299,14 +299,14 @@ apply_plan() {
 
 	if [ "$changed" = "1" ]; then
 		uci -q commit wireless
-		echo "Committed /etc/config/wireless."
+		echo "已提交 /etc/config/wireless。"
 		build_state
 		remember_radios
 
 		reload_wifi="$(get_setting reload_wifi 0)"
 		if [ "$reload_wifi" = "1" ]; then
 			wifi reload
-			echo "Reloaded Wi-Fi."
+			echo "已重载 Wi-Fi。"
 		fi
 	fi
 }

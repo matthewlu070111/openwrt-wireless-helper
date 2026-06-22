@@ -7,5 +7,5 @@ function index()
 		return
 	end
 
-	entry({"admin", "network", "wireless_helper"}, cbi("wireless_helper"), _("Wireless Helper"), 90).dependent = false
+	entry({"admin", "network", "wireless_helper"}, cbi("wireless_helper"), _("无线助手"), 90).dependent = false
 end
