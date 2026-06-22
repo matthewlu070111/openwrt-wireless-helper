@@ -139,22 +139,11 @@ jobs:
         working-directory: openwrt
         run: |
           echo "CONFIG_ALL_KMODS=n" >> .config
-          echo "CONFIG_PACKAGE_liblua=y" >> .config
-          echo "CONFIG_PACKAGE_lua=y" >> .config
-          echo "CONFIG_PACKAGE_openwrt-wireless-helper=y" >> .config
           make defconfig
 
       - name: 编译软件包
         working-directory: openwrt
         run: |
-          if [ -d package/feeds/packages/lua ]; then
-            make package/feeds/packages/lua/compile -j1 V=s
-          elif [ -d package/utils/lua ]; then
-            make package/utils/lua/compile -j1 V=s
-          else
-            echo "找不到 Lua 软件包目录。"
-            exit 1
-          fi
           make package/openwrt-wireless-helper/{clean,compile} -j1 V=s
 
       - name: 收集产物
