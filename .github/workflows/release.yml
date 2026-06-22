@@ -139,6 +139,8 @@ jobs:
         working-directory: openwrt
         run: |
           echo "CONFIG_ALL_KMODS=n" >> .config
+          echo "CONFIG_PACKAGE_liblua=y" >> .config
+          echo "CONFIG_PACKAGE_lua=y" >> .config
           echo "CONFIG_PACKAGE_openwrt-wireless-helper=y" >> .config
           make defconfig
 

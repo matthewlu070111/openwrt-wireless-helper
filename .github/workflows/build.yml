@@ -25,10 +25,8 @@ jobs:
       matrix:
         include:
           - format: ipk
-            openwrt_version_input: openwrt_ipk_version
             default_openwrt_version: "23.05.5"
           - format: apk
-            openwrt_version_input: openwrt_apk_version
             default_openwrt_version: "24.10.2"
 
     steps:
@@ -110,6 +108,8 @@ jobs:
         working-directory: openwrt
         run: |
           echo "CONFIG_ALL_KMODS=n" >> .config
+          echo "CONFIG_PACKAGE_liblua=y" >> .config
+          echo "CONFIG_PACKAGE_lua=y" >> .config
           echo "CONFIG_PACKAGE_openwrt-wireless-helper=y" >> .config
           make defconfig
 
