@@ -1,8 +1,19 @@
 local fs = require "nixio.fs"
 local sys = require "luci.sys"
+local uci = require "luci.model.uci".cursor()
 
 local script = "/usr/libexec/wireless-helper"
 local last_log = "/tmp/wireless-helper.last"
+
+if not uci:get("wireless_helper", "settings") then
+	uci:section("wireless_helper", "settings", "settings", {
+		enabled = "0",
+		path_prefix = "platform/ff5c0000.usb",
+		preferred_radio = "",
+		reload_wifi = "0"
+	})
+	uci:commit("wireless_helper")
+end
 
 local m = Map("wireless_helper", translate("无线助手"),
 	translate("检测并清理因 USB sysfs 路径漂移导致的重复 Wi-Fi radio 配置。"))
@@ -40,34 +51,31 @@ if fs.access(script) then
 	end
 end
 
-local actions = m:section(SimpleSection, translate("操作"))
-
-local scan = actions:option(Button, "_scan", translate("扫描"))
+local scan = s:option(Button, "_scan", translate("扫描"))
 scan.inputstyle = "find"
 function scan.write()
 	sys.call(script .. " status > " .. last_log .. " 2>&1")
 end
 
-local dryrun = actions:option(Button, "_dryrun", translate("预览清理"))
+local dryrun = s:option(Button, "_dryrun", translate("预览清理"))
 dryrun.inputstyle = "reload"
 function dryrun.write()
 	sys.call(script .. " dry-run > " .. last_log .. " 2>&1")
 end
 
-local clean = actions:option(Button, "_clean", translate("清理重复项"))
+local clean = s:option(Button, "_clean", translate("清理重复项"))
 clean.inputstyle = "apply"
 function clean.write()
 	sys.call(script .. " clean > " .. last_log .. " 2>&1")
 end
 
-local remember = actions:option(Button, "_remember", translate("记住当前 radio"))
+local remember = s:option(Button, "_remember", translate("记住当前 radio"))
 remember.inputstyle = "save"
 function remember.write()
 	sys.call(script .. " remember > " .. last_log .. " 2>&1")
 end
 
-local status = m:section(SimpleSection, translate("状态"))
-local output = status:option(TextValue, "_output")
+local output = s:option(TextValue, "_output", translate("状态"))
 output.rows = 18
 output.readonly = true
 output.wrap = "off"
