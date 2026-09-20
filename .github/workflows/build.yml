@@ -16,10 +16,46 @@ on:
         required: false
         default: "25.12.3"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
+  validate:
+    name: 预检源码
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v5
+
+      - name: 安装 Lua 5.1
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.1
+
+      - name: 检查 Shell 和 Lua 语法
+        run: |
+          set -euo pipefail
+          bash -n root/usr/libexec/wireless-helper
+          bash -n root/etc/init.d/wireless_helper
+          bash -n root/etc/hotplug.d/usb/99-wireless-helper
+          bash -n root/etc/uci-defaults/99-wireless-helper-permissions
+          luac5.1 -p luasrc/controller/wireless_helper.lua
+          luac5.1 -p luasrc/model/cbi/wireless_helper.lua
+
   build:
     name: 构建 ${{ matrix.format }}
+    needs: validate
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -31,7 +67,7 @@ jobs:
 
     steps:
       - name: 检出源码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: 安装依赖
         run: |
@@ -44,18 +80,23 @@ jobs:
 
       - name: 解析 OpenWrt SDK
         id: sdk
+        env:
+          REQUESTED_VERSION: ${{ matrix.format == 'ipk' && inputs.openwrt_ipk_version || inputs.openwrt_apk_version }}
+          DEFAULT_VERSION: ${{ matrix.default_openwrt_version }}
         run: |
-          if [ "${{ matrix.format }}" = "ipk" ]; then
-            VER="${{ github.event.inputs.openwrt_ipk_version }}"
-          else
-            VER="${{ github.event.inputs.openwrt_apk_version }}"
-          fi
-          if [ -z "$VER" ]; then
-            VER="${{ matrix.default_openwrt_version }}"
+          set -euo pipefail
+          VER="${REQUESTED_VERSION:-$DEFAULT_VERSION}"
+          if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+            echo "OpenWrt 版本号无效: $VER"
+            exit 1
           fi
 
           BASE_URL="https://downloads.openwrt.org/releases/${VER}/targets/x86/64"
-          SDK_NAME="$(curl -fsSL "${BASE_URL}/" | grep -oE 'openwrt-sdk-[^" ]+Linux-x86_64\.tar\.(zst|xz)' | head -n1)"
+          SDK_INDEX="$(curl -fsSL --retry 5 --retry-all-errors "${BASE_URL}/")"
+          SDK_NAME="$(printf '%s' "$SDK_INDEX" \
+            | grep -oE 'openwrt-sdk-[^"? ]+Linux-x86_64\.tar\.(zst|xz)' \
+            | sort -u \
+            | sed -n '1p' || true)"
           if [ -z "$SDK_NAME" ]; then
             echo "找不到 SDK: ${BASE_URL}"
             exit 1
@@ -66,35 +107,58 @@ jobs:
           echo "openwrt_version=${VER}" >> "$GITHUB_OUTPUT"
 
       - name: 缓存 SDK 压缩包
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: sdk.tar
-          key: ${{ runner.os }}-${{ steps.sdk.outputs.sdk_name }}
+          key: sdk-v2-${{ runner.os }}-${{ steps.sdk.outputs.sdk_name }}
 
       - name: 下载并解压 SDK
         run: |
-          if [ ! -f sdk.tar ]; then
-            wget -q "${{ steps.sdk.outputs.sdk_url }}" -O sdk.tar
+          set -euo pipefail
+          if [ -f sdk.tar ] && ! tar -tf sdk.tar >/dev/null 2>&1; then
+            echo "缓存的 SDK 压缩包已损坏，重新下载。"
+            rm -f sdk.tar
           fi
+          if [ ! -f sdk.tar ]; then
+            curl -fL --retry 5 --retry-all-errors \
+              "${{ steps.sdk.outputs.sdk_url }}" -o sdk.tar
+          fi
+
+          tar -tf sdk.tar >/dev/null
+          rm -rf sdk openwrt
           mkdir -p sdk
           tar -xf sdk.tar -C sdk
-          SDK_DIR="$(find sdk -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -n1)"
+          mapfile -t SDK_DIRS < <(find sdk -mindepth 1 -maxdepth 1 -type d -name 'openwrt-sdk-*')
+          if [ "${#SDK_DIRS[@]}" -ne 1 ]; then
+            echo "SDK 目录数量异常: ${#SDK_DIRS[@]}"
+            find sdk -mindepth 1 -maxdepth 2 -print
+            exit 1
+          fi
+          SDK_DIR="${SDK_DIRS[0]}"
           mv "$SDK_DIR" openwrt
 
       - name: 缓存 OpenWrt 下载目录
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: openwrt/dl
-          key: ${{ runner.os }}-openwrt-dl-${{ steps.sdk.outputs.openwrt_version }}-x86-64-${{ matrix.format }}-v1
+          key: dl-v2-${{ runner.os }}-${{ steps.sdk.outputs.openwrt_version }}-x86-64-${{ matrix.format }}
 
       - name: 更新 feeds
         working-directory: openwrt
         run: |
-          ./scripts/feeds update -a
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            ./scripts/feeds update -a && break
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
           ./scripts/feeds install -a
 
       - name: 注入软件包
         run: |
+          set -euo pipefail
           mkdir -p openwrt/package/openwrt-wireless-helper
           rsync -a --delete \
             --exclude ".git" \
@@ -107,16 +171,20 @@ jobs:
       - name: 生成配置
         working-directory: openwrt
         run: |
+          set -euo pipefail
           echo "CONFIG_ALL_KMODS=n" >> .config
+          echo "CONFIG_PACKAGE_openwrt-wireless-helper=m" >> .config
           make defconfig
 
       - name: 编译软件包
         working-directory: openwrt
         run: |
+          set -euo pipefail
           make package/openwrt-wireless-helper/{clean,compile} -j1 V=s
 
       - name: 收集产物
         run: |
+          set -euo pipefail
           mkdir -p artifacts
           EXT="${{ matrix.format }}"
           echo "=== 所有 ${EXT} 文件 ==="
@@ -140,7 +208,9 @@ jobs:
           ls -lh artifacts/
 
       - name: 上传构建产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: openwrt-wireless-helper-${{ matrix.format }}
           path: artifacts/*.${{ matrix.format }}
+          if-no-files-found: error
+          retention-days: 14

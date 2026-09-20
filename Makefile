@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=openwrt-wireless-helper
-PKG_VERSION:=1.0.0
+PKG_VERSION:=1.2.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=MIT
@@ -13,13 +13,13 @@ define Package/$(PKG_NAME)
   SECTION:=luci
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
-  TITLE:=OpenWrt 无线设备重复项管理助手
-  DEPENDS:=+luci-base
+  TITLE:=OpenWrt 无线设备与 DNS 自愈助手
+  DEPENDS:=+luci-base +jsonfilter
   PKGARCH:=all
 endef
 
 define Package/$(PKG_NAME)/description
-  检测并清理因 USB sysfs 路径漂移导致的重复 Wi-Fi radio 配置。
+  检测并恢复 USB Wi-Fi radio 异常，同步接管 dnsmasq 到 Clash/Mihomo DNS。
 endef
 
 define Build/Compile

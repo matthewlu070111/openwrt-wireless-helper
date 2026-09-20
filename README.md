@@ -1,6 +1,6 @@
 # openwrt-wireless-helper
 
-`openwrt-wireless-helper` 是一个用于 OpenWrt 的无线设备辅助管理 LuCI 插件，主要解决 USB 无线网卡路径漂移后反复新增 `wifi-device` 的问题。
+`openwrt-wireless-helper` 是一个用于 OpenWrt 的无线设备辅助管理 LuCI 插件，用于解决 USB 无线网卡路径漂移后反复新增 `wifi-device`，以及网卡在 netifd 中变为 `unknown` / `down` 后无法自动恢复的问题。
 
 常见现象类似这样：
 
@@ -60,6 +60,12 @@ radio 会在满足以下条件时标记为正在工作：
 - `清理重复项`：执行迁移和清理
 - `记住当前 radio`：把当前 radio 记录为基线，之后新冒出来的 radio 会显示为新增
 - `自动清理`：在系统启动和 USB 热插拔后自动执行清理
+- `健康监控`：同时检查 sysfs 路径、`phy` 和 netifd 中的 `up/down/unknown` 状态
+- `自动恢复`：连续达到设定失败次数后，重置异常 radio 或重启 `network` 服务
+- `立即恢复`：无需等待阈值，手动执行当前恢复策略
+- `DNS 接管`：将 dnsmasq 的默认上游固定到 Clash/Mihomo DNS，并让路由器本机也通过 dnsmasq 解析
+- `DNS 配置同步`：监控被系统或其他插件改回的 dnsmasq 配置，在上游端口存在时自动重新接管
+- `DNS 恢复`：首次接管前会备份原来的上游、`noresolv`、`resolvfile`、`localuse` 和缓存设置，可一键恢复
 
 第一次使用建议先点击 `扫描`，确认信息正常后点击 `记住当前 radio`。之后再选择默认保留的 radio，并使用 `预览清理` 检查计划。
 
@@ -71,6 +77,11 @@ radio 会在满足以下条件时标记为正在工作：
 /usr/libexec/wireless-helper dry-run
 /usr/libexec/wireless-helper clean
 /usr/libexec/wireless-helper remember
+/usr/libexec/wireless-helper health
+/usr/libexec/wireless-helper recover
+/usr/libexec/wireless-helper dns-status
+/usr/libexec/wireless-helper dns-apply
+/usr/libexec/wireless-helper dns-restore
 ```
 
 ## UCI 配置
@@ -87,9 +98,22 @@ radio 会在满足以下条件时标记为正在工作：
 uci set wireless_helper.settings.path_prefix='platform/ff5c0000.usb'
 uci set wireless_helper.settings.preferred_radio='radio3'
 uci set wireless_helper.settings.enabled='1'
+uci set wireless_helper.settings.auto_recover='1'
+uci set wireless_helper.settings.check_interval='60'
+uci set wireless_helper.settings.failure_threshold='3'
+uci set wireless_helper.settings.recovery_action='wifi_reload'
+uci set wireless_helper.settings.dns_takeover='1'
+uci set wireless_helper.settings.dns_upstream='auto'
 uci commit wireless_helper
 /etc/init.d/wireless_helper enable
+/etc/init.d/wireless_helper restart
 ```
+
+`recovery_action` 可设为 `wifi_reload`（仅重置异常 radio）或 `network_restart`（重启整个网络服务，会短暂断开 LAN/WAN）。自动恢复默认关闭，建议先在 LuCI 中使用“健康检查”确认状态识别正常后再开启。
+
+`dns_upstream=auto` 会优先读取 `openclash.config.dns_port`，默认回退到 `127.0.0.1#7874`。接管时会设置 dnsmasq `noresolv=1`、`localuse=1`、`cachesize=0`，并删除 `resolvfile`；默认保留 `/domain/server` 格式的内网域名专用转发。如果 Clash/Mihomo DNS 端口没有监听，脚本不会修改 dnsmasq，以免导致全网 DNS 中断。
+
+> Fake-IP 模式下，域名解析为 `198.18.0.0/16` 是正常现象。解析正常但路由器本机 `ping` 不通时，还需要在 Clash/OpenClash 中开启“代理路由器本机流量”；DNS 接管本身不会替代 OUTPUT/TUN 流量接管。
 
 如果希望清理后立即重载 Wi-Fi：
 

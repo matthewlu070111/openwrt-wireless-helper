@@ -4,15 +4,36 @@ START=98
 USE_PROCD=1
 
 start_service() {
-	local enabled
+	local enabled auto_recover dns_takeover
 
 	enabled="$(uci -q get wireless_helper.settings.enabled)"
 	[ "$enabled" = "1" ] || return 0
 	[ -x /usr/libexec/wireless-helper ] || return 0
 
+	/usr/libexec/wireless-helper clean
+	auto_recover="$(uci -q get wireless_helper.settings.auto_recover)"
+	dns_takeover="$(uci -q get wireless_helper.settings.dns_takeover)"
+	[ "$dns_takeover" = "1" ] && /usr/libexec/wireless-helper dns-apply
+	[ "$auto_recover" = "1" ] || [ "$dns_takeover" = "1" ] || return 0
+
 	procd_open_instance
-	procd_set_param command /usr/libexec/wireless-helper clean
+	procd_set_param command /usr/libexec/wireless-helper watch
+	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
+}
+
+stop_service() {
+	local enabled dns_takeover
+
+	enabled="$(uci -q get wireless_helper.settings.enabled)"
+	dns_takeover="$(uci -q get wireless_helper.settings.dns_takeover)"
+	if [ "$enabled" != "1" ] || [ "$dns_takeover" != "1" ]; then
+		[ -x /usr/libexec/wireless-helper ] && /usr/libexec/wireless-helper dns-restore
+	fi
+}
+
+service_triggers() {
+	procd_add_reload_trigger wireless_helper
 }

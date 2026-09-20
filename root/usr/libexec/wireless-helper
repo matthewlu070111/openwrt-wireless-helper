@@ -7,15 +7,18 @@ STATE_FILE="$TMP_DIR/wireless-helper.devices.$$"
 PLAN_FILE="$TMP_DIR/wireless-helper.plan.$$"
 KNOWN_FILE="$TMP_DIR/wireless-helper.known.$$"
 IFACE_FILE="$TMP_DIR/wireless-helper.ifaces.$$"
+WIRELESS_STATUS_FILE="$TMP_DIR/wireless-helper.ubus.$$"
+DNS_SERVER_FILE="$TMP_DIR/wireless-helper.dns.$$"
+WATCHDOG_LOG="$TMP_DIR/wireless-helper.watchdog.log"
 
 cleanup_tmp() {
-	rm -f "$STATE_FILE" "$PLAN_FILE" "$KNOWN_FILE" "$IFACE_FILE"
+	rm -f "$STATE_FILE" "$PLAN_FILE" "$KNOWN_FILE" "$IFACE_FILE" "$WIRELESS_STATUS_FILE" "$DNS_SERVER_FILE"
 }
 trap cleanup_tmp EXIT
 
 usage() {
 	cat <<'EOF'
-用法: wireless-helper status|list-radios|dry-run|clean|remember
+用法: wireless-helper status|list-radios|dry-run|clean|remember|health|recover|dns-status|dns-apply|dns-restore|watch
 
 status      显示 USB Wi-Fi 设备分组、正在工作的 radio 和新增项。
 list-radios 输出 LuCI 下拉框使用的 radio 选项。
@@ -23,6 +26,12 @@ dry-run     预览将要删除的重复 wifi-device 配置。
 clean       迁移 wifi-iface 引用，删除重复 wifi-device 配置，
             提交 /etc/config/wireless，并按需重载 Wi-Fi。
 remember    将当前检测到的匹配 radio 保存为已知基线。
+health      检查 netifd 报告的无线状态，异常时返回非 0。
+recover     立即按配置的策略恢复异常 radio。
+dns-status  显示 dnsmasq 接管状态和 Clash/Mihomo DNS 监听状态。
+dns-apply   备份 dnsmasq 设置并将 DNS 转发到 Clash/Mihomo。
+dns-restore 恢复接管前的 dnsmasq 设置。
+watch       持续监控，达到连续失败阈值后自动恢复。
 EOF
 }
 
@@ -115,9 +124,29 @@ get_phys() {
 	[ -n "$phys" ] && printf '%s' "$phys" || printf '-'
 }
 
+get_netifd_state() {
+	local section="$1"
+	local up pending
+
+	if [ ! -s "$WIRELESS_STATUS_FILE" ] || ! command -v jsonfilter >/dev/null 2>&1; then
+		printf 'unknown'
+		return 0
+	fi
+
+	up="$(jsonfilter -i "$WIRELESS_STATUS_FILE" -e "@[\"$section\"].up" 2>/dev/null)"
+	pending="$(jsonfilter -i "$WIRELESS_STATUS_FILE" -e "@[\"$section\"].pending" 2>/dev/null)"
+	case "$up" in
+		true|1) printf 'up' ;;
+		false|0)
+			case "$pending" in true|1) printf 'starting' ;; *) printf 'down' ;; esac
+			;;
+		*) printf 'unknown' ;;
+	esac
+}
+
 collect_device() {
 	local section="$1"
-	local path disabled key exists phys ifaces active new
+	local path disabled key exists phys ifaces active new state health
 
 	config_get path "$section" path
 	[ -n "$path" ] || return 0
@@ -132,14 +161,20 @@ collect_device() {
 	[ "$exists" = "1" ] && [ "$disabled" != "1" ] && [ "$ifaces" != "-" ] && active=1
 	new=1
 	is_known_radio "$section" && new=0
+	state="$(get_netifd_state "$section")"
+	health=0
+	[ "$exists" = "1" ] && [ "$disabled" != "1" ] && [ "$ifaces" != "-" ] && \
+		[ "$phys" != "-" ] && [ "$state" = "up" ] && health=1
 
-	printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
-		"$section" "$exists" "$disabled" "$key" "$path" "$phys" "$ifaces" "$active" "$new" >> "$STATE_FILE"
+	printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+		"$section" "$exists" "$disabled" "$key" "$path" "$phys" "$ifaces" "$active" "$new" "$state" "$health" >> "$STATE_FILE"
 }
 
 build_state() {
 	: > "$STATE_FILE"
 	: > "$IFACE_FILE"
+	: > "$WIRELESS_STATUS_FILE"
+	ubus call network.wireless status > "$WIRELESS_STATUS_FILE" 2>/dev/null || true
 	build_known
 	config_load wireless
 	config_foreach collect_iface wifi-iface
@@ -190,7 +225,7 @@ print_status() {
 	awk -F'|' -v preferred="$preferred" '
 	{
 		mark=($1 == preferred) ? "用户选择" : "-"
-		printf "  %-12s 存在=%s 工作中=%s 新增=%s 禁用=%s phy=%s 接口=%s 保留提示=%s\n", $1, $2, $8, $9, $3, $6, $7, mark
+		printf "  %-12s 存在=%s 配置活动=%s 健康=%s netifd=%s 新增=%s 禁用=%s phy=%s 接口=%s 保留提示=%s\n", $1, $2, $8, $11, $10, $9, $3, $6, $7, mark
 		printf "      路径=%s\n", $5
 		groups[$4]++
 	}
@@ -216,7 +251,7 @@ print_radio_choices() {
 
 	awk -F'|' '
 	{
-		printf "%s|%s 存在=%s 工作中=%s 新增=%s phy=%s 接口=%s 路径=%s\n", $1, $1, $2, $8, $9, $6, $7, $5
+		printf "%s|%s 存在=%s 健康=%s netifd=%s 新增=%s phy=%s 接口=%s 路径=%s\n", $1, $1, $2, $11, $10, $9, $6, $7, $5
 	}
 	' "$STATE_FILE"
 }
@@ -276,7 +311,7 @@ apply_plan() {
 		return 0
 	fi
 
-	while IFS='|' read -r action old keep old_section old_exists old_disabled old_key old_path old_phy old_ifaces old_active old_new; do
+	while IFS='|' read -r action old keep old_section old_exists old_disabled old_key old_path old_phy old_ifaces old_active old_new old_state old_health; do
 		[ "$action" = "remove" ] || continue
 
 		OLD_DEVICE="$old"
@@ -311,6 +346,329 @@ apply_plan() {
 	fi
 }
 
+select_dnsmasq_section() {
+	[ -n "$DNSMASQ_SECTION" ] || DNSMASQ_SECTION="$1"
+}
+
+get_dnsmasq_section() {
+	DNSMASQ_SECTION=""
+	config_load dhcp
+	config_foreach select_dnsmasq_section dnsmasq
+	[ -n "$DNSMASQ_SECTION" ]
+}
+
+save_dns_server() {
+	printf '%s\n' "$1" >> "$DNS_SERVER_FILE"
+}
+
+collect_dns_servers() {
+	: > "$DNS_SERVER_FILE"
+	config_load dhcp
+	config_list_foreach "$DNSMASQ_SECTION" server save_dns_server
+}
+
+dns_upstream() {
+	local upstream port
+
+	upstream="$(get_setting dns_upstream auto)"
+	if [ -z "$upstream" ] || [ "$upstream" = "auto" ]; then
+		port="$(uci -q get openclash.config.dns_port)"
+		case "$port" in *[!0-9]*|'') port=7874 ;; esac
+		upstream="127.0.0.1#$port"
+	fi
+	printf '%s' "$upstream"
+}
+
+validate_dns_upstream() {
+	local upstream="$1"
+	local host port
+
+	case "$upstream" in
+		*'#'*) host="${upstream%#*}"; port="${upstream##*#}" ;;
+		*) return 1 ;;
+	esac
+	[ -n "$host" ] || return 1
+	case "$host" in *[!A-Za-z0-9.:_%+-]*) return 1 ;; esac
+	case "$port" in *[!0-9]*|'') return 1 ;; esac
+	[ "$port" -ge 1 ] 2>/dev/null && [ "$port" -le 65535 ] 2>/dev/null
+}
+
+dns_listener_up() {
+	local upstream="$1"
+	local port
+
+	port="${upstream##*#}"
+	netstat -lnut 2>/dev/null | awk -v suffix=":$port" '
+	NR > 2 {
+		address=$4
+		if (length(address) >= length(suffix) && substr(address, length(address) - length(suffix) + 1) == suffix) found=1
+	}
+	END { exit !found }
+	'
+}
+
+backup_dns_option() {
+	local option="$1"
+	local value
+
+	value="$(uci -q get "dhcp.$DNSMASQ_SECTION.$option")"
+	[ -n "$value" ] || value="__unset__"
+	uci -q set "wireless_helper.settings.backup_dns_$option=$value"
+}
+
+restore_dns_option() {
+	local option="$1"
+	local value
+
+	value="$(uci -q get "wireless_helper.settings.backup_dns_$option")"
+	if [ "$value" = "__unset__" ] || [ -z "$value" ]; then
+		uci -q delete "dhcp.$DNSMASQ_SECTION.$option"
+	else
+		uci -q set "dhcp.$DNSMASQ_SECTION.$option=$value"
+	fi
+}
+
+restore_dns_server() {
+	uci -q add_list "dhcp.$DNSMASQ_SECTION.server=$1"
+}
+
+backup_dnsmasq() {
+	local server
+
+	[ "$(get_setting dns_backup_done 0)" = "1" ] && return 0
+	collect_dns_servers
+	uci -q delete wireless_helper.settings.backup_dns_server
+	while IFS= read -r server; do
+		[ -n "$server" ] && uci -q add_list "wireless_helper.settings.backup_dns_server=$server"
+	done < "$DNS_SERVER_FILE"
+	backup_dns_option noresolv
+	backup_dns_option resolvfile
+	backup_dns_option localuse
+	backup_dns_option cachesize
+	uci -q set wireless_helper.settings.dns_backup_done=1
+	uci -q commit wireless_helper
+}
+
+dns_config_matches() {
+	local upstream="$1"
+	local server found=0 unexpected=0
+
+	[ "$(uci -q get "dhcp.$DNSMASQ_SECTION.noresolv")" = "1" ] || return 1
+	[ "$(uci -q get "dhcp.$DNSMASQ_SECTION.localuse")" = "1" ] || return 1
+	[ "$(uci -q get "dhcp.$DNSMASQ_SECTION.cachesize")" = "0" ] || return 1
+	[ -z "$(uci -q get "dhcp.$DNSMASQ_SECTION.resolvfile")" ] || return 1
+	collect_dns_servers
+	while IFS= read -r server; do
+		[ "$server" = "$upstream" ] && found=1
+		case "$server" in
+			"$upstream"|/*) ;;
+			*) [ -n "$server" ] && unexpected=1 ;;
+		esac
+	done < "$DNS_SERVER_FILE"
+	[ "$found" = "1" ] && [ "$unexpected" = "0" ]
+}
+
+apply_dns_takeover() {
+	local upstream keep_domain server
+
+	get_dnsmasq_section || {
+		echo "未找到 dnsmasq 配置节。" >&2
+		return 1
+	}
+	upstream="$(dns_upstream)"
+	validate_dns_upstream "$upstream" || {
+		echo "DNS 上游格式无效: $upstream（应为 IP#端口）" >&2
+		return 1
+	}
+	dns_listener_up "$upstream" || {
+		echo "Clash/Mihomo DNS 尚未在 $upstream 监听，未修改 dnsmasq。" >&2
+		return 1
+	}
+
+	backup_dnsmasq || return 1
+	collect_dns_servers
+	keep_domain="$(get_setting dns_keep_domain_forwards 1)"
+	uci -q delete "dhcp.$DNSMASQ_SECTION.server"
+	if [ "$keep_domain" = "1" ]; then
+		while IFS= read -r server; do
+			case "$server" in /*) uci -q add_list "dhcp.$DNSMASQ_SECTION.server=$server" ;; esac
+		done < "$DNS_SERVER_FILE"
+	fi
+	uci -q add_list "dhcp.$DNSMASQ_SECTION.server=$upstream"
+	uci -q delete "dhcp.$DNSMASQ_SECTION.resolvfile"
+	uci -q set "dhcp.$DNSMASQ_SECTION.noresolv=1"
+	uci -q set "dhcp.$DNSMASQ_SECTION.localuse=1"
+	uci -q set "dhcp.$DNSMASQ_SECTION.cachesize=0"
+	uci -q commit dhcp
+	/etc/init.d/dnsmasq restart
+	echo "DNS 已接管: dnsmasq -> $upstream"
+	echo "路由器本机解析已通过 dnsmasq（localuse=1）。"
+}
+
+restore_dnsmasq() {
+	[ "$(get_setting dns_backup_done 0)" = "1" ] || {
+		uci -q set wireless_helper.settings.dns_takeover=0
+		uci -q commit wireless_helper
+		echo "已关闭 DNS 同步；没有可恢复的 DNS 备份。"
+		return 0
+	}
+	get_dnsmasq_section || return 1
+
+	uci -q delete "dhcp.$DNSMASQ_SECTION.server"
+	config_load wireless_helper
+	config_list_foreach settings backup_dns_server restore_dns_server
+	restore_dns_option noresolv
+	restore_dns_option resolvfile
+	restore_dns_option localuse
+	restore_dns_option cachesize
+	uci -q commit dhcp
+	uci -q delete wireless_helper.settings.dns_backup_done
+	uci -q delete wireless_helper.settings.backup_dns_server
+	uci -q delete wireless_helper.settings.backup_dns_noresolv
+	uci -q delete wireless_helper.settings.backup_dns_resolvfile
+	uci -q delete wireless_helper.settings.backup_dns_localuse
+	uci -q delete wireless_helper.settings.backup_dns_cachesize
+	uci -q set wireless_helper.settings.dns_takeover=0
+	uci -q commit wireless_helper
+	/etc/init.d/dnsmasq restart
+	echo "已关闭 DNS 同步并恢复接管前的 dnsmasq 配置。"
+}
+
+print_dns_status() {
+	local upstream config_state listener_state resolv_state
+
+	get_dnsmasq_section || {
+		echo "dnsmasq: 未找到配置"
+		return 1
+	}
+	upstream="$(dns_upstream)"
+	dns_config_matches "$upstream" && config_state="已接管" || config_state="未接管/配置漂移"
+	dns_listener_up "$upstream" && listener_state="正常" || listener_state="未监听"
+	grep -q '^nameserver 127\.0\.0\.1' /etc/resolv.conf 2>/dev/null && resolv_state="已接管" || resolv_state="未指向本机"
+	echo "dnsmasq 配置: $config_state"
+	echo "Clash/Mihomo DNS: $upstream ($listener_state)"
+	echo "路由器 resolv.conf: $resolv_state"
+	echo "备份可恢复: $(get_setting dns_backup_done 0)"
+	[ "$config_state" = "已接管" ] && [ "$listener_state" = "正常" ]
+}
+
+ensure_dns_takeover() {
+	local upstream
+
+	[ "$(get_setting dns_takeover 0)" = "1" ] || return 0
+	get_dnsmasq_section || return 1
+	upstream="$(dns_upstream)"
+	if ! dns_config_matches "$upstream"; then
+		echo "$(date '+%F %T') 检测到 DNS 配置漂移，正在重新接管。" > "$WATCHDOG_LOG"
+		apply_dns_takeover >> "$WATCHDOG_LOG" 2>&1
+		logger -t wireless-helper "已重新应用 DNS 接管"
+	fi
+}
+
+unhealthy_radios() {
+	awk -F'|' '$3 != "1" && $7 != "-" && $10 != "starting" && $11 != "1" { print $1 }' "$STATE_FILE"
+}
+
+print_health() {
+	local failed=0
+
+	if [ ! -s "$STATE_FILE" ]; then
+		echo "未找到需要监控的 USB Wi-Fi radio。"
+		return 0
+	fi
+
+	awk -F'|' '
+	$3 != "1" && $7 != "-" {
+		label=($11 == "1" ? "正常" : ($10 == "starting" ? "初始化中" : "异常"))
+		printf "%-12s %s (netifd=%s, 路径=%s, phy=%s)\n", $1, label, $10, $2, $6
+	}
+	' "$STATE_FILE"
+
+	[ -z "$(unhealthy_radios)" ] || failed=1
+	return "$failed"
+}
+
+recover_radios() {
+	local requested="$1"
+	local targets action radio delay
+
+	action="$(get_setting recovery_action wifi_reload)"
+	delay="$(get_setting recovery_delay 3)"
+	case "$delay" in *[!0-9]*|'') delay=3 ;; esac
+
+	if [ -n "$requested" ]; then
+		if ! awk -F'|' -v radio="$requested" '$1 == radio { found=1 } END { exit !found }' "$STATE_FILE"; then
+			echo "未找到 radio: $requested" >&2
+			return 1
+		fi
+		targets="$requested"
+	else
+		targets="$(unhealthy_radios)"
+	fi
+
+	if [ -z "$targets" ]; then
+		echo "所有受管 radio 状态正常，无需恢复。"
+		return 0
+	fi
+
+	case "$action" in
+		network_restart)
+			echo "检测到异常 radio: $(echo "$targets" | tr '\n' ' ')"
+			echo "正在重启 network 服务，管理连接可能短暂中断。"
+			/etc/init.d/network restart
+			;;
+		wifi_reload|*)
+			for radio in $targets; do
+				echo "正在重置 $radio ..."
+				wifi down "$radio"
+				sleep "$delay"
+				wifi up "$radio"
+			done
+			;;
+	esac
+}
+
+watch_radios() {
+	local failures=0
+	local interval threshold now targets auto_recover dns_takeover
+
+	interval="$(get_setting check_interval 60)"
+	threshold="$(get_setting failure_threshold 3)"
+	case "$interval" in *[!0-9]*|'') interval=60 ;; esac
+	case "$threshold" in *[!0-9]*|'') threshold=3 ;; esac
+	[ "$interval" -ge 15 ] 2>/dev/null || interval=15
+	[ "$threshold" -ge 1 ] 2>/dev/null || threshold=1
+
+	echo "$(date '+%F %T') 健康监控已启动（间隔 ${interval}s，阈值 ${threshold} 次）" > "$WATCHDOG_LOG"
+	while :; do
+		auto_recover="$(get_setting auto_recover 0)"
+		dns_takeover="$(get_setting dns_takeover 0)"
+		[ "$dns_takeover" = "1" ] && ensure_dns_takeover
+
+		if [ "$auto_recover" = "1" ]; then
+			build_state
+			targets="$(unhealthy_radios)"
+		else
+			targets=""
+			failures=0
+		fi
+		if [ "$auto_recover" = "1" ] && [ -n "$targets" ]; then
+			failures=$((failures + 1))
+			now="$(date '+%F %T')"
+			echo "$now 检测到异常（$failures/$threshold）: $(echo "$targets" | tr '\n' ' ')" > "$WATCHDOG_LOG"
+			logger -t wireless-helper "radio 健康检查失败 $failures/$threshold: $(echo "$targets" | tr '\n' ' ')"
+			if [ "$failures" -ge "$threshold" ]; then
+				recover_radios "" >> "$WATCHDOG_LOG" 2>&1
+				logger -t wireless-helper "已执行无线恢复策略"
+				failures=0
+			fi
+		else
+			failures=0
+		fi
+		sleep "$interval"
+	done
+}
+
 MODE="$1"
 PATH_PREFIX="$(get_setting path_prefix platform/ff5c0000.usb)"
 PREFERRED_RADIO="$(get_setting preferred_radio "")"
@@ -343,6 +701,26 @@ case "$MODE" in
 	remember)
 		build_state
 		remember_radios
+		;;
+	health)
+		build_state
+		print_health
+		;;
+	recover)
+		build_state
+		recover_radios "${2:-$PREFERRED_RADIO}"
+		;;
+	dns-status)
+		print_dns_status
+		;;
+	dns-apply)
+		apply_dns_takeover
+		;;
+	dns-restore)
+		restore_dnsmasq
+		;;
+	watch)
+		watch_radios
 		;;
 	-h|--help|help)
 		usage
