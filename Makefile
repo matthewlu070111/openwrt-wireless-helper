@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=openwrt-wireless-helper
-PKG_VERSION:=1.2.0
+PKG_VERSION:=1.3.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=MIT
@@ -14,7 +14,7 @@ define Package/$(PKG_NAME)
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
   TITLE:=OpenWrt 无线设备与 DNS 自愈助手
-  DEPENDS:=+luci-base +jsonfilter
+  DEPENDS:=+luci-base +jsonfilter +rpcd-mod-iwinfo
   PKGARCH:=all
 endef
 

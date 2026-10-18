@@ -144,9 +144,74 @@ get_netifd_state() {
 	esac
 }
 
+get_netifd_sta_ifnames() {
+	local section="$1"
+
+	[ -s "$WIRELESS_STATUS_FILE" ] || return 0
+	command -v jsonfilter >/dev/null 2>&1 || return 0
+	jsonfilter -i "$WIRELESS_STATUS_FILE" \
+		-e "@[\"$section\"].interfaces[@.config.mode=\"sta\"].ifname" 2>/dev/null
+}
+
+has_sta_iface() {
+	case ",$1," in
+		*,mode:sta,*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+station_link_state() {
+	local section="$1"
+	local ifaces="$2"
+	local netifd_state="$3"
+	local ifname info bssid signal bitrate degraded_detail
+	local found_client=0 found_association=0
+
+	has_sta_iface "$ifaces" || {
+		printf '无需检查'
+		return 0
+	}
+	[ "$netifd_state" = "up" ] || {
+		printf '等待netifd'
+		return 0
+	}
+	command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1 || {
+		printf '未检查'
+		return 0
+	}
+
+	for ifname in $(get_netifd_sta_ifnames "$section"); do
+		found_client=1
+		info="$(ubus call iwinfo info "{\"device\":\"$ifname\"}" 2>/dev/null)"
+		[ -n "$info" ] || continue
+		bssid="$(jsonfilter -s "$info" -e '@.bssid' 2>/dev/null)"
+		printf '%s\n' "$bssid" | grep -Eq '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$' || continue
+		[ "$bssid" != "00:00:00:00:00:00" ] || continue
+		found_association=1
+		signal="$(jsonfilter -s "$info" -e '@.signal' 2>/dev/null)"
+		bitrate="$(jsonfilter -s "$info" -e '@.bitrate' 2>/dev/null)"
+		if printf '%s\n' "$signal" | grep -Eq '^-?[0-9]+$' && \
+			printf '%s\n' "$bitrate" | grep -Eq '^[0-9]+$' && \
+			[ "$signal" -lt 0 ] 2>/dev/null && \
+			[ "$bitrate" -gt 0 ] 2>/dev/null; then
+			printf '正常:%s,%sdBm,%skbit/s' "$ifname" "$signal" "$bitrate"
+			return 0
+		fi
+		[ -n "$degraded_detail" ] || degraded_detail="遥测缺失:$ifname,BSSID=$bssid,信号=${signal:--},速率=${bitrate:--}"
+	done
+
+	if [ -n "$degraded_detail" ]; then
+		printf '%s' "$degraded_detail"
+	elif [ "$found_association" = "0" ] && [ "$found_client" = "1" ]; then
+		printf '未关联'
+	elif [ "$found_client" = "0" ]; then
+		printf '接口缺失'
+	fi
+}
+
 collect_device() {
 	local section="$1"
-	local path disabled key exists phys ifaces active new state health
+	local path disabled key exists phys ifaces active new state health link
 
 	config_get path "$section" path
 	[ -n "$path" ] || return 0
@@ -162,12 +227,17 @@ collect_device() {
 	new=1
 	is_known_radio "$section" && new=0
 	state="$(get_netifd_state "$section")"
+	link="$(station_link_state "$section" "$ifaces" "$state")"
 	health=0
 	[ "$exists" = "1" ] && [ "$disabled" != "1" ] && [ "$ifaces" != "-" ] && \
-		[ "$phys" != "-" ] && [ "$state" = "up" ] && health=1
+		[ "$phys" != "-" ] && [ "$state" = "up" ] && \
+		case "$link" in
+			遥测缺失:*|未关联|接口缺失) ;;
+			*) health=1 ;;
+		esac
 
-	printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
-		"$section" "$exists" "$disabled" "$key" "$path" "$phys" "$ifaces" "$active" "$new" "$state" "$health" >> "$STATE_FILE"
+	printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+		"$section" "$exists" "$disabled" "$key" "$path" "$phys" "$ifaces" "$active" "$new" "$state" "$health" "$link" >> "$STATE_FILE"
 }
 
 build_state() {
@@ -225,7 +295,7 @@ print_status() {
 	awk -F'|' -v preferred="$preferred" '
 	{
 		mark=($1 == preferred) ? "用户选择" : "-"
-		printf "  %-12s 存在=%s 配置活动=%s 健康=%s netifd=%s 新增=%s 禁用=%s phy=%s 接口=%s 保留提示=%s\n", $1, $2, $8, $11, $10, $9, $3, $6, $7, mark
+		printf "  %-12s 存在=%s 配置活动=%s 健康=%s netifd=%s 链路=%s 新增=%s 禁用=%s phy=%s 接口=%s 保留提示=%s\n", $1, $2, $8, $11, $10, $12, $9, $3, $6, $7, mark
 		printf "      路径=%s\n", $5
 		groups[$4]++
 	}
@@ -251,7 +321,7 @@ print_radio_choices() {
 
 	awk -F'|' '
 	{
-		printf "%s|%s 存在=%s 健康=%s netifd=%s 新增=%s phy=%s 接口=%s 路径=%s\n", $1, $1, $2, $11, $10, $9, $6, $7, $5
+		printf "%s|%s 存在=%s 健康=%s netifd=%s 链路=%s 新增=%s phy=%s 接口=%s 路径=%s\n", $1, $1, $2, $11, $10, $12, $9, $6, $7, $5
 	}
 	' "$STATE_FILE"
 }
@@ -311,7 +381,7 @@ apply_plan() {
 		return 0
 	fi
 
-	while IFS='|' read -r action old keep old_section old_exists old_disabled old_key old_path old_phy old_ifaces old_active old_new old_state old_health; do
+	while IFS='|' read -r action old keep old_section old_exists old_disabled old_key old_path old_phy old_ifaces old_active old_new old_state old_health old_link; do
 		[ "$action" = "remove" ] || continue
 
 		OLD_DEVICE="$old"
@@ -580,7 +650,7 @@ print_health() {
 	awk -F'|' '
 	$3 != "1" && $7 != "-" {
 		label=($11 == "1" ? "正常" : ($10 == "starting" ? "初始化中" : "异常"))
-		printf "%-12s %s (netifd=%s, 路径=%s, phy=%s)\n", $1, label, $10, $2, $6
+		printf "%-12s %s (netifd=%s, 链路=%s, 路径=%s, phy=%s)\n", $1, label, $10, $12, $2, $6
 	}
 	' "$STATE_FILE"
 

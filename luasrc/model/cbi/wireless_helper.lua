@@ -25,7 +25,7 @@ if not uci:get("wireless_helper", "settings") then
 end
 
 local m = Map("wireless_helper", translate("无线助手"),
-	translate("检测 USB 无线网卡的路径漂移和 netifd 运行状态，并在网卡变为 unknown 时尝试恢复。"))
+	translate("检测 USB 无线网卡的路径漂移、netifd 状态和客户端链路遥测，并在异常时尝试恢复。"))
 
 local s = m:section(NamedSection, "settings", "settings", translate("设置"))
 s.anonymous = true
@@ -64,11 +64,11 @@ if fs.access(script) then
 	end
 end
 
-local auto_recover = s:taboption("health", Flag, "auto_recover", translate("自动恢复 unknown/down"))
+local auto_recover = s:taboption("health", Flag, "auto_recover", translate("自动恢复无线异常"))
 auto_recover.default = "0"
 auto_recover.rmempty = false
 auto_recover:depends("enabled", "1")
-auto_recover.description = translate("连续多次检测到异常才执行恢复，避免在无线初始化期间误触发。")
+auto_recover.description = translate("检测 unknown/down、客户端未关联，或已关联但信号/速率缺失；连续多次异常才执行恢复。")
 
 local interval = s:taboption("health", Value, "check_interval", translate("检查间隔（秒）"))
 interval.datatype = "uinteger"

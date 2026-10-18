@@ -1,6 +1,6 @@
 # openwrt-wireless-helper
 
-`openwrt-wireless-helper` 是一个用于 OpenWrt 的无线设备辅助管理 LuCI 插件，用于解决 USB 无线网卡路径漂移后反复新增 `wifi-device`，以及网卡在 netifd 中变为 `unknown` / `down` 后无法自动恢复的问题。
+`openwrt-wireless-helper` 是一个用于 OpenWrt 的无线设备辅助管理 LuCI 插件，用于解决 USB 无线网卡路径漂移后反复新增 `wifi-device`，以及网卡在 netifd 中变为 `unknown` / `down`、客户端已关联但信号和速率遥测丢失后无法自动恢复的问题。
 
 常见现象类似这样：
 
@@ -60,7 +60,7 @@ radio 会在满足以下条件时标记为正在工作：
 - `清理重复项`：执行迁移和清理
 - `记住当前 radio`：把当前 radio 记录为基线，之后新冒出来的 radio 会显示为新增
 - `自动清理`：在系统启动和 USB 热插拔后自动执行清理
-- `健康监控`：同时检查 sysfs 路径、`phy` 和 netifd 中的 `up/down/unknown` 状态
+- `健康监控`：同时检查 sysfs 路径、`phy`、netifd 状态，以及 Client 接口的 BSSID、信号和速率
 - `自动恢复`：连续达到设定失败次数后，重置异常 radio 或重启 `network` 服务
 - `立即恢复`：无需等待阈值，手动执行当前恢复策略
 - `DNS 接管`：将 dnsmasq 的默认上游固定到 Clash/Mihomo DNS，并让路由器本机也通过 dnsmasq 解析
@@ -110,6 +110,8 @@ uci commit wireless_helper
 ```
 
 `recovery_action` 可设为 `wifi_reload`（仅重置异常 radio）或 `network_restart`（重启整个网络服务，会短暂断开 LAN/WAN）。自动恢复默认关闭，建议先在 LuCI 中使用“健康检查”确认状态识别正常后再开启。
+
+对于 Client/STA 接口，健康检查会读取与 LuCI 无线概览相同的 `iwinfo` 数据。未关联，或已经有 BSSID 但信号/速率为空（显示为 `— dBm`、`? Mbit/s`）时会判定为异常；AP 接口不做这项检查。监控仍需连续达到 `failure_threshold` 次才会执行恢复，避免把正常的短暂重连当成故障。
 
 `dns_upstream=auto` 会优先读取 `openclash.config.dns_port`，默认回退到 `127.0.0.1#7874`。接管时会设置 dnsmasq `noresolv=1`、`localuse=1`、`cachesize=0`，并删除 `resolvfile`；默认保留 `/domain/server` 格式的内网域名专用转发。如果 Clash/Mihomo DNS 端口没有监听，脚本不会修改 dnsmasq，以免导致全网 DNS 中断。
 
