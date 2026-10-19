@@ -102,6 +102,7 @@ uci set wireless_helper.settings.auto_recover='1'
 uci set wireless_helper.settings.check_interval='60'
 uci set wireless_helper.settings.failure_threshold='3'
 uci set wireless_helper.settings.recovery_action='wifi_reload'
+uci set wireless_helper.settings.recovery_settle_time='30'
 uci set wireless_helper.settings.dns_takeover='1'
 uci set wireless_helper.settings.dns_upstream='auto'
 uci commit wireless_helper
@@ -109,7 +110,7 @@ uci commit wireless_helper
 /etc/init.d/wireless_helper restart
 ```
 
-`recovery_action` 可设为 `wifi_reload`（仅重置异常 radio）或 `network_restart`（重启整个网络服务，会短暂断开 LAN/WAN）。自动恢复默认关闭，建议先在 LuCI 中使用“健康检查”确认状态识别正常后再开启。
+`recovery_action` 可设为 `wifi_reload`（仅重置异常 radio）或 `network_restart`（关闭接口后直接请求 procd 重启 netifd，会短暂断开 LAN/WAN）。后一种方式不会调用部分第三方固件中可能因 `procd.sh` 兼容问题而失败的 `/etc/init.d/network restart`。恢复后会在 `recovery_settle_time` 内反复检查目标 radio，只有链路真正恢复才记录为成功。自动恢复默认关闭，建议先在 LuCI 中使用“健康检查”确认状态识别正常后再开启。
 
 对于 Client/STA 接口，健康检查会读取与 LuCI 无线概览相同的 `iwinfo` 数据。未关联，或已经有 BSSID 但信号/速率为空（显示为 `— dBm`、`? Mbit/s`）时会判定为异常；AP 接口不做这项检查。监控仍需连续达到 `failure_threshold` 次才会执行恢复，避免把正常的短暂重连当成故障。
 

@@ -17,6 +17,7 @@ if not uci:get("wireless_helper", "settings") then
 		failure_threshold = "3",
 		recovery_action = "wifi_reload",
 		recovery_delay = "3",
+		recovery_settle_time = "30",
 		dns_takeover = "0",
 		dns_upstream = "auto",
 		dns_keep_domain_forwards = "1"
@@ -83,14 +84,20 @@ threshold:depends("auto_recover", "1")
 
 local action = s:taboption("health", ListValue, "recovery_action", translate("恢复策略"))
 action:value("wifi_reload", translate("仅重置异常 radio（推荐）"))
-action:value("network_restart", translate("重启 network 服务（强力）"))
+action:value("network_restart", translate("重启 netifd 与全部接口（强力）"))
 action.default = "wifi_reload"
-action.description = translate("重启 network 服务会短暂中断 LAN/WAN 和当前 LuCI 连接。")
+action.description = translate("强力恢复会绕开固件的 network init 脚本，直接由 procd 重启 netifd；LAN/WAN 和当前 LuCI 连接会短暂中断。")
 
 local delay = s:taboption("health", Value, "recovery_delay", translate("radio 重置等待（秒）"))
 delay.datatype = "uinteger"
 delay.default = "3"
 delay:depends("recovery_action", "wifi_reload")
+
+local settle = s:taboption("health", Value, "recovery_settle_time", translate("恢复后复检时间（秒）"))
+settle.datatype = "uinteger"
+settle.default = "30"
+settle:depends("auto_recover", "1")
+settle.description = translate("等待无线重新关联并反复检查；最少 5 秒。")
 
 local monitor = s:taboption("health", TextValue, "_monitor", translate("最近监控记录"))
 monitor.rows = 4

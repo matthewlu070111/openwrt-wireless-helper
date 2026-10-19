@@ -639,6 +639,16 @@ unhealthy_radios() {
 	awk -F'|' '$3 != "1" && $7 != "-" && $10 != "starting" && $11 != "1" { print $1 }' "$STATE_FILE"
 }
 
+unrecovered_targets() {
+	local targets="$1"
+	local radio health
+
+	for radio in $targets; do
+		health="$(state_value "$radio" 11)"
+		[ "$health" = "1" ] || echo "$radio"
+	done
+}
+
 print_health() {
 	local failed=0
 
@@ -658,12 +668,62 @@ print_health() {
 	return "$failed"
 }
 
+restart_network_daemon() {
+	local payload='{"name":"network","signal":15}'
+
+	# 某些第三方固件的 procd.sh 会在 /etc/init.d/network restart 中因空
+	# shift 中止。先执行 network 的正常停机动作，再直接让 procd 重启
+	# 它已经监管的 netifd 实例，避开有兼容问题的 start_service 路径。
+	[ ! -x /sbin/wifi ] || /sbin/wifi down >/dev/null 2>&1 || true
+	command -v ifdown >/dev/null 2>&1 && ifdown -a >/dev/null 2>&1 || true
+
+	if ubus call service signal "$payload" >/dev/null 2>&1; then
+		echo "已请求 procd 重启 netifd。"
+		return 0
+	fi
+
+	if command -v killall >/dev/null 2>&1 && killall -TERM netifd >/dev/null 2>&1; then
+		echo "procd 信号接口不可用，已直接终止 netifd，等待 procd 拉起。"
+		return 0
+	fi
+
+	echo "无法重启 netifd。" >&2
+	return 1
+}
+
+verify_recovery() {
+	local targets="$1"
+	local timeout="$2"
+	local elapsed=0 remaining
+
+	case "$timeout" in *[!0-9]*|'') timeout=30 ;; esac
+	[ "$timeout" -ge 5 ] 2>/dev/null || timeout=5
+
+	while [ "$elapsed" -lt "$timeout" ]; do
+		sleep 5
+		elapsed=$((elapsed + 5))
+		build_state
+		remaining="$(unrecovered_targets "$targets")"
+		if [ -z "$remaining" ]; then
+			echo "恢复后复检通过（等待 ${elapsed}s）。"
+			return 0
+		fi
+	done
+
+	echo "恢复后仍然异常: $(echo "$remaining" | tr '\n' ' ')" >&2
+	for radio in $remaining; do
+		awk -F'|' -v radio="$radio" '$1 == radio { printf "  %s: netifd=%s, 链路=%s, 路径=%s, phy=%s\n", $1, $10, $12, $2, $6 }' "$STATE_FILE" >&2
+	done
+	return 1
+}
+
 recover_radios() {
 	local requested="$1"
-	local targets action radio delay
+	local targets action radio delay settle action_ok=0
 
 	action="$(get_setting recovery_action wifi_reload)"
 	delay="$(get_setting recovery_delay 3)"
+	settle="$(get_setting recovery_settle_time 30)"
 	case "$delay" in *[!0-9]*|'') delay=3 ;; esac
 
 	if [ -n "$requested" ]; then
@@ -684,18 +744,25 @@ recover_radios() {
 	case "$action" in
 		network_restart)
 			echo "检测到异常 radio: $(echo "$targets" | tr '\n' ' ')"
-			echo "正在重启 network 服务，管理连接可能短暂中断。"
-			/etc/init.d/network restart
+			echo "正在重启 netifd 和全部网络接口，管理连接可能短暂中断。"
+			restart_network_daemon && action_ok=1
 			;;
 		wifi_reload|*)
+			action_ok=1
 			for radio in $targets; do
 				echo "正在重置 $radio ..."
-				wifi down "$radio"
+				wifi down "$radio" || action_ok=0
 				sleep "$delay"
-				wifi up "$radio"
+				wifi up "$radio" || action_ok=0
 			done
 			;;
 	esac
+
+	[ "$action_ok" = "1" ] || {
+		echo "恢复命令执行失败。" >&2
+		return 1
+	}
+	verify_recovery "$targets" "$settle"
 }
 
 watch_radios() {
@@ -728,8 +795,11 @@ watch_radios() {
 			echo "$now 检测到异常（$failures/$threshold）: $(echo "$targets" | tr '\n' ' ')" > "$WATCHDOG_LOG"
 			logger -t wireless-helper "radio 健康检查失败 $failures/$threshold: $(echo "$targets" | tr '\n' ' ')"
 			if [ "$failures" -ge "$threshold" ]; then
-				recover_radios "" >> "$WATCHDOG_LOG" 2>&1
-				logger -t wireless-helper "已执行无线恢复策略"
+				if recover_radios "" >> "$WATCHDOG_LOG" 2>&1; then
+					logger -t wireless-helper "无线恢复后复检通过"
+				else
+					logger -t wireless-helper "无线恢复后仍异常，稍后将再次尝试"
+				fi
 				failures=0
 			fi
 		else
